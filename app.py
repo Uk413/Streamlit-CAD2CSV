@@ -13,10 +13,11 @@ with st.sidebar:
     1. **Upload Image**
         * Upload your CAD image
         * Click on "Extract Data"
+        * The system will automatically detect the accessory type from the image
     
-    2. **Select Accessory Type**
-        * Choose from: Pendant, Ringband, Earring, Bracelet, or Necklace
-        * Each type has specific calculations
+    2. **Verify Accessory Type**
+        * The detected accessory type will be displayed
+        * You can override it if needed
     
     3. **Fill Values**
         * Each field needs to be filled individually
@@ -54,6 +55,8 @@ if 'finding_18kt' not in st.session_state:
     st.session_state.finding_18kt = 0.0
 if 'finding_plt' not in st.session_state:
     st.session_state.finding_plt = 0.0
+if 'detected_accessory_type' not in st.session_state:
+    st.session_state.detected_accessory_type = None
 
 # Initialize markup state variables
 if 'gold_markup_type' not in st.session_state:
@@ -111,34 +114,83 @@ with st.form("data_form"):
     submit_image = st.form_submit_button("Extract Data")
 
 if submit_image and uploaded_file:
-    with st.spinner("Processing image..."):
+    with st.spinner("Extracting raw data from image..."):
         image = Image.open(uploaded_file)
         st.image(image, caption="Uploaded Image", use_container_width=True)
         
+        # First, extract and cache the raw data
         files = {"file": uploaded_file.getvalue()}
         try:
-            response = requests.post(
-                "https://utkarsh134-fastapi-img2csv.hf.space/extract-diamonds/",
+            extract_response = requests.post(
+                "https://utkarsh134-fastapi-img2csv.hf.space/extract-raw-data/",
                 files=files
             )
             
-            if response.status_code == 200:
-                st.session_state.diamonds = response.json()['diamonds']
-                st.success("Diamond data extracted successfully!")
+            if extract_response.status_code == 200:
+                extraction_data = extract_response.json()
+                extraction_id = extraction_data["extraction_id"]
+                
+                # Store extraction ID in session state
+                st.session_state.extraction_id = extraction_id
+                
+                st.success("Image data extracted and cached successfully!")
+                
+                # Now detect accessory type using the extraction ID
+                type_response = requests.post(
+                    "https://utkarsh134-fastapi-img2csv.hf.space/detect-accessory-type/",
+                    data={"extraction_id": extraction_id}
+                )
+                
+                if type_response.status_code == 200:
+                    detection_result = type_response.json()
+                    st.session_state.detected_accessory_type = detection_result['detected_accessory_type']
+                    st.success(f"Detected accessory type: {st.session_state.detected_accessory_type}")
+                    
+                    # Update the session state accessory type
+                    st.session_state.accessory_type = st.session_state.detected_accessory_type
+                else:
+                    st.warning(f"Could not detect accessory type: {type_response.text}")
+                
+                # Now extract diamond data using the extraction ID
+                diamond_response = requests.post(
+                    "https://utkarsh134-fastapi-img2csv.hf.space/extract-diamonds/",
+                    data={"extraction_id": extraction_id}
+                )
+                
+                if diamond_response.status_code == 200:
+                    st.session_state.diamonds = diamond_response.json()['diamonds']
+                    st.success("Diamond data extracted successfully!")
+                else:
+                    st.error(f"Failed to extract diamond data: {diamond_response.text}")
             else:
-                st.error(f"Failed to extract diamond data: {response.text}")
+                st.error(f"Failed to extract and cache image data: {extract_response.text}")
         except requests.exceptions.ConnectionError:
             st.error("Could not connect to the server. Please ensure the FastAPI server is running.")
 
-# First display markup settings
-st.subheader("Accessory Type")
-accessory_type = st.radio(
-    "Select Accessory Type",
-    ["pendant", "ringband", "earring", "bracelet", "necklace"],  # Added necklace
-    horizontal=True,
-    key="accessory_type_radio"
-)
-st.session_state.accessory_type = accessory_type
+# First display the detected accessory type with option to override
+if st.session_state.detected_accessory_type:
+    st.subheader("Accessory Type")
+    st.info(f"Automatically detected accessory type: **{st.session_state.detected_accessory_type}**")
+    
+    override_type = st.checkbox("Override detected type?", value=False)
+    
+    if override_type:
+        accessory_type = st.radio(
+            "Select Accessory Type",
+            ["pendant", "ringband", "earring", "bracelet", "necklace"],
+            horizontal=True,
+            index=["pendant", "ringband", "earring", "bracelet", "necklace"].index(st.session_state.accessory_type)
+        )
+        st.session_state.accessory_type = accessory_type
+else:
+    st.subheader("Accessory Type")
+    accessory_type = st.radio(
+        "Select Accessory Type",
+        ["pendant", "ringband", "earring", "bracelet", "necklace"],
+        horizontal=True,
+        key="accessory_type_radio"
+    )
+    st.session_state.accessory_type = accessory_type
 
 st.subheader("Markup Settings")
 
@@ -235,6 +287,9 @@ if st.session_state.diamonds:
     st.subheader("Enter Diamond Rates and Finding Values")
     
     with st.form("diamond_rates_form"):
+        # Get the accessory type from session state
+        accessory_type = st.session_state.accessory_type
+        
         # Add finding values section
         st.subheader("Finding Values")
         finding_labels = {
@@ -337,11 +392,10 @@ if st.session_state.diamonds:
             st.session_state.finding_plt = finding_plt
             
             with st.spinner("Processing final data..."):
-                # Use the uploaded file from earlier
-                if 'uploaded_file' in locals() and uploaded_file:
-                    files = {"file": uploaded_file.getvalue()}
-                    
+                # Use the extraction ID rather than re-uploading the file
+                if 'extraction_id' in st.session_state:
                     data = {
+                        "extraction_id": st.session_state.extraction_id,
                         "accessory_type": st.session_state.accessory_type,
                         "finding_14kt": finding_14kt,
                         "finding_18kt": finding_18kt,
@@ -360,7 +414,6 @@ if st.session_state.diamonds:
                     try:
                         response = requests.post(
                             "https://utkarsh134-fastapi-img2csv.hf.space/process-image/",
-                            files=files,
                             data=data
                         )
                         
@@ -371,6 +424,8 @@ if st.session_state.diamonds:
                             st.error(f"Processing failed: {response.text}")
                     except requests.exceptions.ConnectionError:
                         st.error("Could not connect to the server. Please ensure the FastAPI server is running.")
+                else:
+                    st.error("No extraction ID found. Please upload the image again.")
 
 if st.session_state.csv_data is not None:
     st.download_button(
